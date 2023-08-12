@@ -48,14 +48,13 @@ if __name__ == '__main__':
 
     
     Names = multiprocessing.Manager().list()
-    Time = multiprocessing.Manager().list()
 
     t = multiprocessing.Pool(50)
 
-    t.apply_async(work_on_page, (base_url + "jxtz.htm", Names, Time, ))
+    t.apply_async(work_on_page, (base_url + "jxtz.htm", Names, ))
 
     for i in range(1, page):
-        t.apply_async(work_on_page, (base_url + "jxtz/" + str(i) + ".htm", Names, Time,))
+        t.apply_async(work_on_page, (base_url + "jxtz/" + str(i) + ".htm", Names, ))
 
     t.close()
 
