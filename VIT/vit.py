@@ -23,16 +23,18 @@ device = (
 if not os.path.exists("./models"):
     os.makedirs("./models")
 
-batch_size = 2
+batch_size = 64
 epoch = 10
 patch_size = 16
-learning_rate = 1e-3
+learning_rate = 4e-5
 
 transfer = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
+
+dct = {}
 
 class MyDataset(Dataset):
 
@@ -43,9 +45,12 @@ class MyDataset(Dataset):
         # print(os.listdir(dir))
         filenames = [f for f in os.listdir(dir)]
         self.lab = []
+        self.dict = {}
         self.filenames = []
-        for i in filenames:
+        for id, i in enumerate(filenames):
             dirr = os.path.join(dir, i)
+            self.dict[i] = id
+            dct[id] = i
             for j in os.listdir(dirr):
                 self.lab.append(i)
                 self.filenames.append(j)
@@ -64,7 +69,7 @@ class MyDataset(Dataset):
         data = Image.open(dir).convert("RGB")
         if(self.transform):
             data = self.transform(data)
-        return data, self.lab[index]
+        return data, self.dict[self.lab[index]]
         
 dataset = MyDataset('./data/caltech101/101_ObjectCategories', transfer)
 
@@ -76,6 +81,13 @@ num = [i for i in range(len(dataset))]
 random.shuffle(num)
 
 train_len = int(len(dataset) * 0.8)
+
+test = random.randint(0, len(dataset) - 1)
+test_img, test_lab = dataset[test]
+test_img = test_img.permute(1, 2, 0)
+plt.imshow(test_img)
+plt.title(dct[test_lab])
+plt.show()
 
 train_dataset = []
 test_dataset = []
@@ -97,33 +109,33 @@ test_dataloader = DataLoader(test_dataset, batch_size = batch_size, shuffle = Tr
 class Pre_work(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.cls = nn.Parameter(torch.Tensor(batch_size, 1, patch_size ** 2 * 3))
-        self.emd = nn.Parameter(torch.Tensor(batch_size, 196, patch_size ** 2 * 3))
+        self.cls = nn.Parameter(torch.Tensor(1, 1, patch_size ** 2 * 3))
+        self.emd = nn.Parameter(torch.Tensor(1, 196, patch_size ** 2 * 3))
         self.linear = nn.Linear(768, 768)
     
     def forward(self, x):
         # print(x.shape)
-        x = x.view(batch_size, 3, 224, -1, 16)
+        x = x.view(x.shape[0], 3, 224, -1, 16)
         x = x.permute(0, 1, 4, 3, 2).contiguous()
         # print(x.shape)
-        x = x.view(batch_size, 3, x.shape[2], x.shape[3], -1, 16)
+        x = x.view(x.shape[0], 3, x.shape[2], x.shape[3], -1, 16)
         # print(x.shape)
         x = x.permute(0, 3, 4, 1, 2, 5).contiguous()
-        x = x.view(batch_size, x.shape[1], x.shape[2], -1)
-        x = x.view(batch_size, -1, x.shape[3])
+        x = x.view(x.shape[0], x.shape[1], x.shape[2], -1)
+        x = x.view(x.shape[0], -1, x.shape[3])
         # print(x.shape, "/n", self.emd.shape)
         # print(x.device, self.emd.device)
-        return self.linear(torch.cat([x + self.emd, self.cls], dim = 1))
+        return self.linear(torch.cat([x + self.emd, self.cls.expand(x.shape[0], 1, self.cls.shape[2])], dim = 1))
 
 def trans_pos(x, n):
-    x = x.view(batch_size, 197, n, -1)
+    x = x.view(x.shape[0], 197, n, -1)
     x = x.permute(0, 2, 1, 3)
     x = x.reshape(-1, x.shape[2], x.shape[3])
     return x
-def trans_neg(x):
-    x = x.view(batch_size, -1, x.shape[1], x.shape[2])
+def trans_neg(x, n):
+    x = x.view(n, -1, x.shape[1], x.shape[2])
     x = x.permute(0, 2, 3, 1)
-    x = x.reshape(batch_size, x.shape[1], -1)
+    x = x.reshape(x.shape[0], x.shape[1], -1)
     return x
 
 class dotproductattention(nn.Module):
@@ -144,6 +156,7 @@ class multihead(nn.Module):
         self.W_q = nn.Linear(q_size, hide_num)
         self.W_v = nn.Linear(v_size, hide_num)
         self.W_k = nn.Linear(k_size, hide_num)
+        self.W_o = nn.Linear(hide_num, hide_num)
         self.head_num = head_num
         
     def forward(self, q, v, k):
@@ -151,7 +164,8 @@ class multihead(nn.Module):
         K = trans_pos(self.W_k(k), self.head_num)
         V = trans_pos(self.W_v(v), self.head_num)
         res = self.attention(Q, V, K)
-        return trans_neg(res)
+        # print("REs:", res.shape)
+        return self.W_o(trans_neg(res, q.shape[0]))
 
 class vit(nn.Module):
     def __init__(self) -> None:
@@ -163,15 +177,17 @@ class vit(nn.Module):
         self.linear = nn.Linear(768, 101)
         self.mlp = nn.Sequential(
             nn.Linear(768, 3072),
+            nn.ReLU(),
             nn.Linear(3072, 768)
         )
     
     def forward(self, x):
         # print(x.shape)
         x = self.pre(x)
-        print(x.shape)
+        # print(x.shape)
         y = self.l1(x)
         y = self.multihead(y, y, y)
+        # print(y.shape)
         y = y + x
         z = self.l2(y)
         z = self.mlp(z)
@@ -179,7 +195,7 @@ class vit(nn.Module):
         return self.linear(torch.squeeze(z[:, 0, :]))
 
 model = vit().to(device)
-summary(model, (3, 224, 224), batch_size=batch_size, device=device)
+# summary(model, (3, 224, 224), batch_size=batch_size, device=device)
 
 optims = optim.Adam(model.parameters(), lr = learning_rate)
 crit = nn.CrossEntropyLoss()
@@ -187,16 +203,20 @@ crit = nn.CrossEntropyLoss()
 def train(dataloader, model, ep):
     model.train()
     for i, (image, label) in enumerate(dataloader):
+        # print("QWQ")
+        # print(image, label)
+        # print(label)
         image = image.to(device)
         label = label.to(device)
-        print(image.shape, label.shape)
+        # if(image.shape[0] != batch_size):
+        #     continue
         optims.zero_grad()
         res = model(image)
         loss = crit(res, label)
         loss.backward()
         optims.step()
 
-        if (i + 1) % 100 == 0:
+        if (i + 1) % 10 == 0:
             print(f'Epoch [{ep + 1:>3d} / {epoch:>3d}] Step [{(i + 1) :>4d} / {len(dataloader):>4d}] Loss: {loss :>7f}')
 
 def test(dataloader, model):
