@@ -23,7 +23,7 @@ device = (
 if not os.path.exists("./models"):
     os.makedirs("./models")
 
-batch_size = 64
+batch_size = 2
 epoch = 10
 patch_size = 16
 learning_rate = 1e-3
@@ -97,27 +97,33 @@ test_dataloader = DataLoader(test_dataset, batch_size = batch_size, shuffle = Tr
 class Pre_work(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.cls = nn.Parameter(torch.Tensor([batch_size, 1, patch_size ** 2 * 3]))
-        self.emd = nn.Parameter(torch.Tensor([batch_size, (224 / patch_size) ** 2, patch_size ** 2 * 3]))
+        self.cls = nn.Parameter(torch.Tensor(batch_size, 1, patch_size ** 2 * 3))
+        self.emd = nn.Parameter(torch.Tensor(batch_size, 196, patch_size ** 2 * 3))
         self.linear = nn.Linear(768, 768)
     
     def forward(self, x):
+        # print(x.shape)
         x = x.view(batch_size, 3, 224, -1, 16)
-        x = x.permute(0, 1, 4, 3, 2)
-        x = x.view(batch_size, 3, 16, 14, -1, 16)
-        x = x.permute(0, 3, 4, 1, 2, 5)
-        x = x.view(batch_size, 14 * 14, -1)
+        x = x.permute(0, 1, 4, 3, 2).contiguous()
+        # print(x.shape)
+        x = x.view(batch_size, 3, x.shape[2], x.shape[3], -1, 16)
+        # print(x.shape)
+        x = x.permute(0, 3, 4, 1, 2, 5).contiguous()
+        x = x.view(batch_size, x.shape[1], x.shape[2], -1)
+        x = x.view(batch_size, -1, x.shape[3])
+        # print(x.shape, "/n", self.emd.shape)
+        # print(x.device, self.emd.device)
         return self.linear(torch.cat([x + self.emd, self.cls], dim = 1))
 
 def trans_pos(x, n):
-    x = x.view(batch_size, 14*14, n, -1)
-    x = x.premute(0, 2, 1, 3)
-    x = x.view(-1, x.shape[2], x.shape[3])
+    x = x.view(batch_size, 197, n, -1)
+    x = x.permute(0, 2, 1, 3)
+    x = x.reshape(-1, x.shape[2], x.shape[3])
     return x
 def trans_neg(x):
     x = x.view(batch_size, -1, x.shape[1], x.shape[2])
-    x = x.premute(0, 2, 3, 1)
-    x = x.view(batch_size, x.shape[1], -1)
+    x = x.permute(0, 2, 3, 1)
+    x = x.reshape(batch_size, x.shape[1], -1)
     return x
 
 class dotproductattention(nn.Module):
@@ -128,7 +134,7 @@ class dotproductattention(nn.Module):
     def forward(self, q, v, k):
         d = q.shape[-1]
         res = torch.bmm(q, k.transpose(1, 2)) / math.sqrt(d)
-        res = res.softmax()
+        res = nn.functional.softmax(res)
         return torch.bmm(self.drop(res), v)
 
 class multihead(nn.Module):
@@ -161,7 +167,9 @@ class vit(nn.Module):
         )
     
     def forward(self, x):
+        # print(x.shape)
         x = self.pre(x)
+        print(x.shape)
         y = self.l1(x)
         y = self.multihead(y, y, y)
         y = y + x
@@ -171,9 +179,9 @@ class vit(nn.Module):
         return self.linear(torch.squeeze(z[:, 0, :]))
 
 model = vit().to(device)
-summary(model, (64, 3, 224, 224), device="cpu")
+summary(model, (3, 224, 224), batch_size=batch_size, device=device)
 
-optims = optim.Adam(model.parameters, lr = learning_rate)
+optims = optim.Adam(model.parameters(), lr = learning_rate)
 crit = nn.CrossEntropyLoss()
 
 def train(dataloader, model, ep):
@@ -181,7 +189,7 @@ def train(dataloader, model, ep):
     for i, (image, label) in enumerate(dataloader):
         image = image.to(device)
         label = label.to(device)
-        # print(image, label)
+        print(image.shape, label.shape)
         optims.zero_grad()
         res = model(image)
         loss = crit(res, label)
